@@ -31,10 +31,12 @@ import argparse
 import os
 import time
 
+from gym import spaces
 import gym
 import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow as tf
+from gym.utils import seeding
 
 import tensorlayer as tl
 
@@ -61,6 +63,105 @@ TEST_PER_EPISODES = 10      # test the model per episodes
 VAR = 3                     # control exploration
 
 ###############################  DDPG  ####################################
+
+
+class PendulumEnv(gym.Env):
+    metadata = {
+        'render.modes': ['human', 'rgb_array'],
+        'video.frames_per_second': 30
+    }
+
+    def __init__(self, g=10.0):
+        self.max_speed = 8
+        self.max_torque = 2.
+        self.dt = .05
+        self.g = g
+        self.m = 1.
+        self.l = 1.
+        self.viewer = None
+
+        high = np.array([1., 1., self.max_speed], dtype=np.float32)
+        self.action_space = spaces.Box(
+            low=-self.max_torque,
+            high=self.max_torque, shape=(1,),
+            dtype=np.float32
+        )
+        self.observation_space = spaces.Box(
+            low=-high,
+            high=high,
+            dtype=np.float32
+        )
+
+        self.seed()
+
+    def seed(self, seed=None):
+        self.np_random, seed = seeding.np_random(seed)
+        return [seed]
+
+    def step(self, u):
+        th, thdot = self.state  # th := theta
+
+        g = self.g
+        m = self.m
+        l = self.l
+        dt = self.dt
+
+        u = np.clip(u, -self.max_torque, self.max_torque)[0]
+        self.last_u = u  # for rendering
+        costs = angle_normalize(th) ** 2 + .1 * thdot ** 2 + .001 * (u ** 2)
+        calc = (-3 * g / (2 * l) * np.sin(th + np.pi) + 3. / (m * l ** 2) * u) * dt
+        newthdot = thdot + calc
+        newth = th + newthdot * dt
+        newthdot = np.clip(newthdot, -self.max_speed, self.max_speed)
+
+        self.state = np.array([newth, newthdot])
+        return self._get_obs(), -costs, False, {}
+
+    def reset(self):
+        high = np.array([np.pi, 1])
+        self.state = self.np_random.uniform(low=-high, high=high)
+        self.last_u = None
+        return self._get_obs()
+
+    def _get_obs(self):
+        theta, thetadot = self.state
+        return np.array([np.cos(theta), np.sin(theta), thetadot])
+
+    def render(self, mode='human'):
+        if self.viewer is None:
+            from gym.envs.classic_control import rendering
+            self.viewer = rendering.Viewer(500, 500)
+            self.viewer.set_bounds(-2.2, 2.2, -2.2, 2.2)
+            rod = rendering.make_capsule(1, .2)
+            rod.set_color(.8, .3, .3)
+            self.pole_transform = rendering.Transform()
+            rod.add_attr(self.pole_transform)
+            self.viewer.add_geom(rod)
+            axle = rendering.make_circle(.05)
+            axle.set_color(0, 0, 0)
+            self.viewer.add_geom(axle)
+            fname = path.join(path.dirname(__file__), "assets/clockwise.png")
+            self.img = rendering.Image(fname, 1., 1.)
+            self.imgtrans = rendering.Transform()
+            self.img.add_attr(self.imgtrans)
+
+        self.viewer.add_onetime(self.img)
+        self.pole_transform.set_rotation(self.state[0] + np.pi / 2)
+        if self.last_u:
+            self.imgtrans.scale = (-self.last_u / 2, np.abs(self.last_u) / 2)
+
+        return self.viewer.render(return_rgb_array=mode == 'rgb_array')
+
+    def close(self):
+        if self.viewer:
+            self.viewer.close()
+            self.viewer = None
+
+
+def angle_normalize(x):
+    aa=(((x+np.pi) % (2*np.pi)) - np.pi)
+    return  aa
+
 
 class DDPG(object):
     """
@@ -248,8 +349,10 @@ class DDPG(object):
 if __name__ == '__main__':
     
     #初始化环境
-    env = gym.make(ENV_NAME)
-    env = env.unwrapped
+    # env = gym.make(ENV_NAME)
+    # env = env.unwrapped
+
+    env = PendulumEnv()
 
     # reproducible，设置随机种子，为了能够重现
     env.seed(RANDOMSEED)
@@ -284,7 +387,9 @@ if __name__ == '__main__':
                 # 因此需要需要以a为均值，VAR为标准差，建立正态分布，再从正态分布采样出a
                 # 因为a是均值，所以a的概率是最大的。但a相对其他概率由多大，是靠VAR调整。这里我们其实可以增加更新VAR，动态调整a的确定性
                 # 然后进行裁剪
-                a = np.clip(np.random.normal(a, VAR), -2, 2)  
+                a = np.clip(np.random.normal(a, VAR), -2, 2) 
+                # a = np.clip((a+np.random.rand()), -2, 2) 
+                # a = np.clip(a, -2, 2) 
                 # 与环境进行互动
                 s_, r, done, info = env.step(a)
 
@@ -300,9 +405,12 @@ if __name__ == '__main__':
                 ep_reward += r  #记录当前EP的总reward
                 if j == MAX_EP_STEPS - 1:
                     print(
-                        '\rEpisode: {}/{}  | Episode Reward: {:.4f}  | Running Time: {:.4f}'.format(
+                        '\rEpisode1: {}/{}  | Episode Reward: {:.4f}  | Running Time: {:.4f} | Running a: {:.4f} | Running th: {:.4f} | Running thdet: {:.4f}'.format(
                             i, MAX_EPISODES, ep_reward,
-                            time.time() - t1
+                            time.time() - t1,
+                            np.array(a)[0],
+                            env.state[0],
+                            env.state[1]
                         ), end=''
                     )
                 plt.show()
@@ -320,7 +428,7 @@ if __name__ == '__main__':
                     ep_reward += r
                     if j == MAX_EP_STEPS - 1:
                         print(
-                            '\rEpisode: {}/{}  | Episode Reward: {:.4f}  | Running Time: {:.4f}'.format(
+                            '\rEpisode2: {}/{}  | Episode Reward: {:.4f}  | Running Time: {:.4f}'.format(
                                 i, MAX_EPISODES, ep_reward,
                                 time.time() - t1
                             )
@@ -328,20 +436,20 @@ if __name__ == '__main__':
 
                         reward_buffer.append(ep_reward)
 
-            if reward_buffer:
-                plt.ion()
-                plt.cla()
-                plt.title('DDPG')
-                plt.plot(np.array(range(len(reward_buffer))) * TEST_PER_EPISODES, reward_buffer)  # plot the episode vt
-                plt.xlabel('episode steps')
-                plt.ylabel('normalized state-action value')
-                plt.ylim(-2000, 0)
-                plt.show()
-                plt.pause(0.1)
+            # if reward_buffer:
+            #     plt.ion()
+            #     plt.cla()
+            #     plt.title('DDPG')
+            #     plt.plot(np.array(range(len(reward_buffer))) * TEST_PER_EPISODES, reward_buffer)  # plot the episode vt
+            #     plt.xlabel('episode steps')
+            #     plt.ylabel('normalized state-action value')
+            #     plt.ylim(-2000, 0)
+            #     plt.show()
+            #     plt.pause(0.1)
         plt.ioff()
         plt.show()
         print('\nRunning time: ', time.time() - t0)
-        ddpg.save_ckpt()
+        # ddpg.save_ckpt()
 
     # test
     ddpg.load_ckpt()
